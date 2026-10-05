@@ -15,10 +15,11 @@ module Wire_bundles_mtln_m
    use ilumina_m
    implicit none
    
-   real(kind=RKIND_wires) :: eps0,mu0
+   real(kind=RKIND_WIRES) :: eps0,mu0
    private   
 
-   public InitWires_mtln, AdvanceWiresE_mtln, GetSolverPtr, solveMTLNProblem, reportSimulationEnd
+   public InitWires_mtln, AdvanceWiresE_mtln, GetSolverPtr, initializeMTLNProblem, runMTLNProblem, reportSimulationEnd
+   public InitMTLNObservation, UpdateMTLNObservation, CloseMTLNObservation
    type(mtln_solver_t), target :: mtln_solver
    integer, dimension(:,:), allocatable :: indexMap
 
@@ -28,29 +29,29 @@ contains
    subroutine InitWires_mtln(sgg,Ex,Ey,Ez, sggMiEx, sggMiEy, sggMiEz, sggMiHx, sggMiHy, sggMiHz, eps00, mu00, mtln_parsed,thereAreMTLNbundles, dtcritico)
       type(SGGFDTDINFO_t), intent(in), target    :: sgg 
       real(kind=RKIND), intent(inout), target :: &
-         Ex(sgg%Alloc(iEx)%XI : sgg%Alloc(iEx)%XE,  &
-            sgg%Alloc(iEx)%YI : sgg%Alloc(iEx)%YE,  &
-            sgg%Alloc(iEx)%ZI : sgg%Alloc(iEx)%ZE), &
-         Ey(sgg%Alloc(iEy)%XI : sgg%Alloc(iEy)%XE,  &
-            sgg%Alloc(iEy)%YI : sgg%Alloc(iEy)%YE,  &
-            sgg%Alloc(iEy)%ZI : sgg%Alloc(iEy)%ZE), &
-         Ez(sgg%Alloc(iEz)%XI : sgg%Alloc(iEz)%XE,  &
-            sgg%Alloc(iEz)%YI : sgg%Alloc(iEz)%YE,  &
-            sgg%Alloc(iEz)%ZI : sgg%Alloc(iEz)%ZE)
+         Ex(sgg%Alloc(IEX)%XI : sgg%Alloc(IEX)%XE,  &
+            sgg%Alloc(IEX)%YI : sgg%Alloc(IEX)%YE,  &
+            sgg%Alloc(IEX)%ZI : sgg%Alloc(IEX)%ZE), &
+         Ey(sgg%Alloc(IEY)%XI : sgg%Alloc(IEY)%XE,  &
+            sgg%Alloc(IEY)%YI : sgg%Alloc(IEY)%YE,  &
+            sgg%Alloc(IEY)%ZI : sgg%Alloc(IEY)%ZE), &
+         Ez(sgg%Alloc(IEZ)%XI : sgg%Alloc(IEZ)%XE,  &
+            sgg%Alloc(IEZ)%YI : sgg%Alloc(IEZ)%YE,  &
+            sgg%Alloc(IEZ)%ZI : sgg%Alloc(IEZ)%ZE)
 
       integer(kind=INTEGERSIZEOFMEDIAMATRICES), intent(in) :: &
-         sggMiEx(sgg%Alloc(iEx)%XI : sgg%Alloc(iEx)%XE,sgg%Alloc(iEx)%YI : sgg%Alloc(iEx)%YE,sgg%Alloc(iEx)%ZI : sgg%Alloc(iEx)%ZE), &
-         sggMiEy(sgg%Alloc(iEy)%XI : sgg%Alloc(iEy)%XE,sgg%Alloc(iEy)%YI : sgg%Alloc(iEy)%YE,sgg%Alloc(iEy)%ZI : sgg%Alloc(iEy)%ZE), &
-         sggMiEz(sgg%Alloc(iEz)%XI : sgg%Alloc(iEz)%XE,sgg%Alloc(iEz)%YI : sgg%Alloc(iEz)%YE,sgg%Alloc(iEz)%ZI : sgg%Alloc(iEz)%ZE), &
-         sggMiHx(sgg%Alloc(iHx)%XI : sgg%Alloc(iHx)%XE,sgg%Alloc(iHx)%YI : sgg%Alloc(iHx)%YE,sgg%Alloc(iHx)%ZI : sgg%Alloc(iHx)%ZE), &
-         sggMiHy(sgg%Alloc(iHy)%XI : sgg%Alloc(iHy)%XE,sgg%Alloc(iHy)%YI : sgg%Alloc(iHy)%YE,sgg%Alloc(iHy)%ZI : sgg%Alloc(iHy)%ZE), &
-         sggMiHz(sgg%Alloc(iHz)%XI : sgg%Alloc(iHz)%XE,sgg%Alloc(iHz)%YI : sgg%Alloc(iHz)%YE,sgg%Alloc(iHz)%ZI : sgg%Alloc(iHz)%ZE)
+         sggMiEx(sgg%Alloc(IEX)%XI : sgg%Alloc(IEX)%XE,sgg%Alloc(IEX)%YI : sgg%Alloc(IEX)%YE,sgg%Alloc(IEX)%ZI : sgg%Alloc(IEX)%ZE), &
+         sggMiEy(sgg%Alloc(IEY)%XI : sgg%Alloc(IEY)%XE,sgg%Alloc(IEY)%YI : sgg%Alloc(IEY)%YE,sgg%Alloc(IEY)%ZI : sgg%Alloc(IEY)%ZE), &
+         sggMiEz(sgg%Alloc(IEZ)%XI : sgg%Alloc(IEZ)%XE,sgg%Alloc(IEZ)%YI : sgg%Alloc(IEZ)%YE,sgg%Alloc(IEZ)%ZI : sgg%Alloc(IEZ)%ZE), &
+         sggMiHx(sgg%Alloc(IHX)%XI : sgg%Alloc(IHX)%XE,sgg%Alloc(IHX)%YI : sgg%Alloc(IHX)%YE,sgg%Alloc(IHX)%ZI : sgg%Alloc(IHX)%ZE), &
+         sggMiHy(sgg%Alloc(IHY)%XI : sgg%Alloc(IHY)%XE,sgg%Alloc(IHY)%YI : sgg%Alloc(IHY)%YE,sgg%Alloc(IHY)%ZI : sgg%Alloc(IHY)%ZE), &
+         sggMiHz(sgg%Alloc(IHZ)%XI : sgg%Alloc(IHZ)%XE,sgg%Alloc(IHZ)%YI : sgg%Alloc(IHZ)%YE,sgg%Alloc(IHZ)%ZI : sgg%Alloc(IHZ)%ZE)
    
       real(kind=RKIND) :: eps00,mu00
    
       type(mtln_t) :: mtln_parsed
       logical :: thereAreMTLNbundles
-      real(kind=rkind_tiempo), intent(inout) :: dtcritico
+      real(kind=RKIND_TIME), intent(inout) :: dtcritico
 #ifdef CompileWithMPI
       integer(kind=4) :: ierr
 #endif
@@ -86,6 +87,10 @@ contains
          do m = 1, mtln_solver%number_of_bundles
             if (mtln_solver%bundles(m)%bundle_in_layer) then 
                do n = 1, ubound(mtln_solver%bundles(m)%external_field_segments,1)
+                  ! Synthetic layer-junction "gap" segments carry an out-of-range
+                  ! direction (see SEGMENT_GAP_ORIENTATION in mtl_m) and do not
+                  ! correspond to a real field point; they must be skipped here.
+                  if (abs(mtln_solver%bundles(m)%external_field_segments(n)%direction) > 3) cycle
                   call readGridIndices(i, j, k, mtln_solver%bundles(m)%external_field_segments(n))
                   select case (abs(mtln_solver%bundles(m)%external_field_segments(n)%direction))
                      case(DIRECTION_X_POS)
@@ -114,7 +119,7 @@ contains
 
       logical function isEmbeddedInPECorLossy(media)
          integer(kind=INTEGERSIZEOFMEDIAMATRICES), intent(in) :: media
-         isEmbeddedInPECorLossy = (media == 0 .or. sgg%med(media)%is%pec .or. sgg%med(media)%is%lossy)
+         isEmbeddedInPECorLossy = (media == 0 .or. sgg%med(media)%is%PEC .or. sgg%med(media)%is%lossy)
    end function
 
    end subroutine InitWires_mtln
@@ -122,9 +127,9 @@ contains
    subroutine AdvanceWiresE_mtln(sgg,Idxh, Idyh, Idzh, eps00,mu00)  
       type(SGGFDTDINFO_t), intent(in), target    :: sgg      
       real(kind=RKIND), dimension(:), intent(in) :: &
-         Idxh(sgg%ALLOC(iEx)%XI : sgg%ALLOC(iEx)%XE),&
-         Idyh(sgg%ALLOC(iEy)%YI : sgg%ALLOC(iEy)%YE),&
-         Idzh(sgg%ALLOC(iEz)%ZI : sgg%ALLOC(iEz)%ZE)  
+         Idxh(sgg%ALLOC(IEX)%XI : sgg%ALLOC(IEX)%XE),&
+         Idyh(sgg%ALLOC(IEY)%YI : sgg%ALLOC(IEY)%YE),&
+         Idzh(sgg%ALLOC(IEZ)%ZI : sgg%ALLOC(IEZ)%ZE)  
       real(kind=RKIND) :: cte,eps00,mu00, f
       integer(kind=4) :: m, n
       real(kind=RKIND),pointer:: punt
@@ -135,8 +140,11 @@ contains
       do m = 1, mtln_solver%number_of_bundles
          if (mtln_solver%bundles(m)%bundle_in_layer) then 
             do n = 1, ubound(mtln_solver%bundles(m)%external_field_segments,1)
+               ! Skip synthetic layer-junction "gap" segments: their field
+               ! pointer is never associated (see pointSegmentsToFields above).
+               if (abs(mtln_solver%bundles(m)%external_field_segments(n)%direction) > 3) cycle
                punt => mtln_solver%bundles(m)%external_field_segments(n)%field
-               punt = real(punt, kind=rkind_wires) - computeFieldFromCurrent(m,n)
+               punt = real(punt, kind=RKIND_WIRES) - computeFieldFromCurrent(m,n)
             end do
          end if
       end do
@@ -197,12 +205,30 @@ contains
       return
    end function
 
-   subroutine solveMTLNProblem(mtln_parsed, nEntradaRoot)
+   subroutine InitMTLNObservation(nInputRoot)
+      character(len=*), intent(in) :: nInputRoot
+      call mtln_solver%initObservation(nInputRoot)
+   end subroutine
+
+   subroutine UpdateMTLNObservation(step)
+      integer, intent(in) :: step
+      call mtln_solver%updateObservation(step)
+   end subroutine
+
+   subroutine CloseMTLNObservation()
+      call mtln_solver%closeObservation()
+   end subroutine
+
+   subroutine initializeMTLNProblem(mtln_parsed, nInputRoot)
       type(mtln_t) :: mtln_parsed
-      character(len=*), intent(in) :: nEntradaRoot
+      character(len=*), intent(in) :: nInputRoot
       mtln_solver = mtlnCtor(mtln_parsed)
+      mtln_solver%full_wave = .false.
       call mtln_solver%updatePULTerms()
-      call mtln_solver%initObservation(nEntradaRoot)
+      call mtln_solver%initObservation(nInputRoot)
+   end subroutine
+
+   subroutine runMTLNProblem()
       call mtln_solver%run()
       call mtln_solver%closeObservation()
    end subroutine

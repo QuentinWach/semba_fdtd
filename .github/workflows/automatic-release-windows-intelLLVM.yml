@@ -14,7 +14,6 @@ jobs:
         build-type: ["Release"]
         mpi: ["OFF"]
         mtln: ["ON"]
-        hdf: ["ON"]
 
     steps:
 
@@ -32,10 +31,26 @@ jobs:
       id: setup-fortran
       with:
         compiler: intel
-        version: '2025.2.1'    
-    
+        version: '2025.2.1'
+
+    # ifx requires MSVC's linker and Windows SDK environment on the hosted runner.
+    - name: Setup MSVC toolchain
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
     - name: Setup ninja
       uses: seanmiddleditch/gha-setup-ninja@master
+
+    # CMake 4.4 cannot detect the ifx 2025.2 Fortran preprocessor on Windows.
+    - name: Setup CMake
+      shell: pwsh
+      run: |
+        $archive = "$env:RUNNER_TEMP\cmake-3.31.6-windows-x86_64.zip"
+        $directory = "$env:RUNNER_TEMP\cmake-3.31.6-windows-x86_64"
+        Invoke-WebRequest -Uri https://cmake.org/files/v3.31/cmake-3.31.6-windows-x86_64.zip -OutFile $archive
+        Expand-Archive -Path $archive -DestinationPath $env:RUNNER_TEMP
+        "$directory\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
     - name: CMake build
       shell: bash
@@ -43,25 +58,122 @@ jobs:
         cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
           -DSEMBA_FDTD_ENABLE_MPI=${{matrix.mpi}} \
-          -DSEMBA_FDTD_ENABLE_HDF=${{matrix.hdf}} \
-          -DSEMBA_FDTD_ENABLE_MTLN=${{matrix.mtln}}
+          -DSEMBA_FDTD_ENABLE_MTLN=${{matrix.mtln}} \
+          -DHDF5_DIR="$PWD/precompiled_libraries/windows-intel/hdf5/cmake" \
+          -DHDF5_USE_STATIC_LIBRARIES=ON
         cmake --build build -j 
 
     - name: Run fdtd unit tests
       run: |
         build/bin/fdtd_tests.exe
-    
+
     - name: Install python wrapper requirements
       run: |
         python -m pip install -r requirements.txt
+
+    - name: Run HDF movie smoke test
+      run: python -m pytest test/pyWrapper/test_full_system.py::test_movie_in_planewave_in_box --basetemp=build/hdf-smoke
 
     - name: Run all wrapper tests (except codemodel)
       env:
         SEMBA_FDTD_ENABLE_MPI: ${{ matrix.mpi }}
         SEMBA_FDTD_ENABLE_MTLN: ${{ matrix.mtln }}
-        SEMBA_FDTD_ENABLE_HDF: ${{ matrix.hdf }}
-      run: python -m pytest -m 'not codemodel' test/
-    
+      run: python -m pytest -m 'not codemodel' test/ --deselect=test/pyWrapper/test_full_system.py::test_movie_in_planewave_in_box --basetemp=build/pytest-tmp
+
+    - name: Upload failed HDF output diagnostics
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: hdf-output-${{ matrix.mtln }}
+        path: |
+          build/hdf-smoke/**
+          build/pytest-tmp/**/*.h5
+          build/pytest-tmp/**/*.xdmf
+          build/pytest-tmp/**/*.json
+        if-no-files-found: warn
+
+    # Bundle the Intel Fortran and MSVC runtime libraries so the released
+    # binaries do not depend on a oneAPI installation being present (#85).
+    - name: Bundle Windows runtime libraries
+      shell: pwsh
+      run: |
+        $destination = "build/bin"
+
+        # Non-system DLLs imported by the released binaries.
+        $intelDlls = @(
+          "libifcoremd.dll",
+          "libifportmd.dll",
+          "libmmd.dll",
+          "svml_dispmd.dll",
+          "libiomp5md.dll"
+        )
+
+        # The oneAPI compiler layout differs across versions, so try the known
+        # runtime locations of the pinned compiler and fall back to any install.
+        $intelDirs = @(
+          "$env:ONEAPI_ROOT\compiler\latest\windows\redist\intel64_win\compiler",
+          "$env:ONEAPI_ROOT\compiler\latest\redist\intel64_win\compiler",
+          "$env:ONEAPI_ROOT\compiler\latest\bin"
+        ) | Where-Object { Test-Path $_ }
+        if (-not $intelDirs) {
+          $intelDirs = Get-ChildItem "$env:ONEAPI_ROOT\compiler" -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              "$($_.FullName)\windows\redist\intel64_win\compiler"
+              "$($_.FullName)\redist\intel64_win\compiler"
+              "$($_.FullName)\bin"
+            } |
+            Where-Object { Test-Path $_ }
+        }
+
+        foreach ($dll in $intelDlls) {
+          $source = $null
+          foreach ($dir in $intelDirs) {
+            if (Test-Path (Join-Path $dir $dll)) { $source = Join-Path $dir $dll; break }
+          }
+          if (-not $source) { throw "Intel runtime library '$dll' not found under '$env:ONEAPI_ROOT'" }
+          Copy-Item $source -Destination $destination -Force
+        }
+
+        # The Intel runtime and ngspice also need the MSVC C++ runtime.
+        $crtDir = Get-ChildItem "$env:VCToolsRedistDir\x64" -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue |
+          Select-Object -First 1
+        if (-not $crtDir) { throw "MSVC redistributable folder not found under '$env:VCToolsRedistDir\x64'" }
+        Copy-Item "$($crtDir.FullName)\*.dll" -Destination $destination -Force
+
+    - name: Verify bundled Windows runtime libraries
+      shell: pwsh
+      run: |
+        $binDir = "build/bin"
+
+        # DLLs shipped with Windows itself; any other dependency must be bundled.
+        $systemDlls = @(
+          "advapi32.dll", "bcrypt.dll", "comdlg32.dll", "crypt32.dll", "gdi32.dll",
+          "imagehlp.dll", "kernel32.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll",
+          "shell32.dll", "shlwapi.dll", "user32.dll", "userenv.dll", "winmm.dll",
+          "wintrust.dll", "ws2_32.dll"
+        )
+
+        $missing = @()
+        $binaries = Get-ChildItem $binDir -File | Where-Object { $_.Extension.ToLower() -in @(".exe", ".dll") }
+        foreach ($binary in $binaries) {
+          $dependencies = & dumpbin /nologo /dependents $binary.FullName |
+            Select-String '^\s+(\S+\.dll)\s*$' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value.ToLower() }
+          foreach ($dependency in $dependencies) {
+            if ($dependency.StartsWith("api-ms-win-") -or $dependency.StartsWith("ext-ms-")) { continue }
+            if ($systemDlls -contains $dependency) { continue }
+            if (-not (Test-Path (Join-Path $binDir $dependency))) {
+              $missing += "$($binary.Name) -> $dependency"
+            }
+          }
+        }
+
+        if ($missing.Count -gt 0) {
+          $missing | ForEach-Object { Write-Host "Missing: $_" }
+          throw "$($missing.Count) runtime dependencies are not bundled in $binDir"
+        }
+        Write-Host "All runtime dependencies are bundled in $binDir."
+
     - name: Get current date
       id: date
       run: echo "::set-output name=date::$(date +'%Y-%m-%d')"
@@ -79,4 +191,3 @@ jobs:
         title: "${{ steps.date.outputs.date }} Windows Intel LLVM dev. build"
         files: |
           semba-fdtd-windows-intelLLVM.tar.gz
-

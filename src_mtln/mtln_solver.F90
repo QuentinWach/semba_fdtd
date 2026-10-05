@@ -3,22 +3,32 @@ module mtln_solver_m
     use mtl_bundle_m
     use network_manager_m
     use mtln_preprocess_m
-    use FDETYPES_m, only: XYZlimit_t, RKIND_TIEMPO
+    use probes_m, only: MTLN_PROBE_OUTPUT_ACTIVE, MTLN_PROBE_OUTPUT_COMPLETE, &
+                        MTLN_PROBE_OUTPUT_DECLARED, MTLN_PROBE_OUTPUT_FAILED
+    use FDETYPES_m, only: XYZlimit_t, RKIND_TIME
+    use directoryUtils_m, only: create_file_with_path
 #ifdef CompileWithMPI
     use FDETYPES_m, only: SUBCOMM_MPI, REALSIZE, INTEGERSIZE, MPI_STATUS_SIZE
+    use mpi
 #endif
     implicit none
+#if defined(CompileWithMPI) && defined(IFXCompiler)
+    external :: MPI_Allreduce
+#endif
 
 
     type, public :: mtln_t
-        real(kind=RKIND_TIEMPO) :: time, dt, final_time
+        real(kind=RKIND_TIME) :: time, dt, final_time
         type(mtl_bundle_t), allocatable, dimension(:) :: bundles
         type(network_manager_t) :: network_manager
         ! type(probe_t), allocatable, dimension(:) :: probes
-        integer :: number_of_bundles
-        integer :: number_of_steps
+        integer(kind=4) :: number_of_bundles
+        logical :: has_active_bundles
+        ! Full-wave problems have no reference conductor for the outermost
+        ! bundle conductors; standalone MTLN problems are ground-referenced.
+        logical :: full_wave = .true.
+        integer(kind=4) :: number_of_steps
         real(kind=rkind) :: null_field
-
     contains
 
         procedure :: updateBundlesTimeStep
@@ -27,6 +37,7 @@ module mtln_solver_m
         procedure :: getTimeRange
         procedure :: updateProbes
         procedure :: advanceNWVoltage
+        procedure :: updateOpenNodes
         procedure :: advanceBundlesVoltage
         procedure :: advanceBundlesCurrent
         procedure :: advanceTime
@@ -39,6 +50,8 @@ module mtln_solver_m
         procedure :: initObservation => mtln_initObservation
         procedure :: updateObservation => mtln_updateObservation
         procedure :: closeObservation => mtln_closeObservation
+
+        procedure :: hasActiveBundles
     end type mtln_t
 
 
@@ -53,7 +66,7 @@ contains
         type(parsed_mtln_t) :: parsed
         type(XYZlimit_t), dimension(1:6), intent(in), optional :: alloc
         type(mtln_t) :: res
-        integer :: i
+        integer(kind=4) :: i
         type(preprocess_t) :: pre
 
 #ifdef CompileWithMPI
@@ -79,7 +92,7 @@ contains
         
         res%bundles = pre%bundles
         res%number_of_bundles = size(res%bundles)
-        
+        res%has_active_bundles = res%hasActiveBundles()
         res%network_manager = pre%network_manager
         ! res%probes = pre%probes
         call res%updateBundlesTimeStep(res%dt)
@@ -91,17 +104,37 @@ contains
 
     subroutine initNodes(this)
         class(mtln_t) :: this
-        integer :: i,j
+        integer(kind=4) :: i,j
+        integer(kind=4) ::b, c, v_idx, i_idx
+        integer(kind=4) :: n
+        if (this%number_of_bundles == 0) return
+        if (size(this%network_manager%networks) == 0) return
         do i = 1, size(this%network_manager%networks)
             do j = 1, size(this%network_manager%networks(i)%nodes)
-                this%network_manager%networks(i)%nodes(j)%v = 0.0
-                this%network_manager%networks(i)%nodes(j)%i = 0.0
+                b = this%network_manager%networks(i)%nodes(j)%bundle_number
+                c = this%network_manager%networks(i)%nodes(j)%conductor_number
+                v_idx = this%network_manager%networks(i)%nodes(j)%v_index
+                i_idx = this%network_manager%networks(i)%nodes(j)%i_index
+                if (this%bundles(b)%bundle_in_layer) then
+                    this%network_manager%networks(i)%nodes(j)%i => this%bundles(b)%i(c, i_idx)
+                    this%network_manager%networks(i)%nodes(j)%v => this%bundles(b)%v(c, v_idx)
+                    this%network_manager%has_active_node = .true.
+                end if
             end do
         end do
+
     end subroutine
 
     subroutine mtln_step(this)
         class(mtln_t) :: this
+        if (this%number_of_bundles == 0) then
+            call this%advanceTime()
+            return
+        end if
+        if (this%has_active_bundles .eqv. .false.) then
+            call this%advanceTime()
+            return
+        end if
         call this%setExternalLongitudinalField()
         call this%advanceBundlesVoltage()
         call this%advanceNWVoltage()
@@ -111,9 +144,20 @@ contains
 
     end subroutine
 
+    logical function hasActiveBundles(this)
+        class(mtln_t) :: this
+        integer(kind=4) :: i
+        this%has_active_bundles = .false.
+        do i = 1, this%number_of_bundles
+            if (this%bundles(i)%bundle_in_layer) then
+                hasActiveBundles = .true.
+            end if
+        end do
+    end function
+
     subroutine step_alone(this)
         class(mtln_t) :: this
-        integer :: i 
+        integer(kind=4) :: i 
 
         call this%advanceBundlesVoltage()
         call this%advanceNWVoltage()
@@ -126,11 +170,7 @@ contains
 
     subroutine setExternalLongitudinalField(this)
         class(mtln_t) :: this
-        integer :: i
-#ifdef CompileWithMPI
-        integer :: ierr
-      call MPI_Barrier(SUBCOMM_MPI,ierr)
-#endif
+        integer(kind=4) :: i
         do i = 1, this%number_of_bundles
             if (this%bundles(i)%bundle_in_layer) call this%bundles(i)%setExternalLongitudinalField()
         end do
@@ -139,7 +179,7 @@ contains
 
     subroutine advanceBundlesVoltage(this)
         class(mtln_t) :: this
-        integer :: i
+        integer(kind=4) :: i
 
         do i = 1, this%number_of_bundles
             if (this%bundles(i)%bundle_in_layer) then
@@ -152,57 +192,47 @@ contains
 
     subroutine advanceNWVoltage(this)
         class(mtln_t) :: this
-        integer :: i,j
-        integer ::b, c, v_idx, i_idx
-        integer :: n
+        integer(kind=4) :: i,j
+        integer(kind=4) ::b, c, v_idx, i_idx
+        integer(kind=4) :: n
 ! #ifdef CompileWithMPI
 !         integer(kind=4) :: ierr
 !         call mpi_barrier(subcomm_mpi, ierr)
 ! #endif
-        if (this%number_of_bundles /= 0) then 
-            do i = 1, size(this%network_manager%networks)
-                do j = 1, size(this%network_manager%networks(i)%nodes)
-                    b = this%network_manager%networks(i)%nodes(j)%bundle_number
-                    c = this%network_manager%networks(i)%nodes(j)%conductor_number
-                    v_idx = this%network_manager%networks(i)%nodes(j)%v_index
-                    i_idx = this%network_manager%networks(i)%nodes(j)%i_index
-                    if (this%bundles(b)%bundle_in_layer) this%network_manager%networks(i)%nodes(j)%i = this%bundles(b)%i(c, i_idx)
-                end do
-            end do
-            
-            call this%network_manager%advanceVoltage()
+        if (this%number_of_bundles == 0) return
+        if (size(this%network_manager%networks) == 0) return
+        if (.not. this%network_manager%has_active_node) return
 
-            do i = 1, size(this%network_manager%networks)
-                do j = 1, size(this%network_manager%networks(i)%nodes)
-                    b = this%network_manager%networks(i)%nodes(j)%bundle_number
-                    c = this%network_manager%networks(i)%nodes(j)%conductor_number
-                    if (.not. this%network_manager%networks(i)%nodes(j)%open) then 
-                        v_idx = this%network_manager%networks(i)%nodes(j)%v_index
-                        i_idx = this%network_manager%networks(i)%nodes(j)%i_index
-                        if (this%bundles(b)%bundle_in_layer) this%bundles(b)%v(c, v_idx) = this%network_manager%networks(i)%nodes(j)%v
-                    else 
-                        if (this%network_manager%networks(i)%nodes(j)%side == TERMINAL_NODE_SIDE_INI) then 
-                            this%bundles(b)%v(c,1) = this%bundles(b)%v(c,1) - 2*dot_product(this%bundles(b)%i_diff(1,c,:), this%bundles(b)%i(:,1))
-                        else if (this%network_manager%networks(i)%nodes(j)%side == TERMINAL_NODE_SIDE_END) then 
-                            n = this%bundles(b)%number_of_divisions
-                            this%bundles(b)%v(c,n+1) = this%bundles(b)%v(c,n+1) + 2*dot_product(this%bundles(b)%i_diff(n,c,:), this%bundles(b)%i(:,n))
-                        end if
+        call this%network_manager%advanceVoltage()
+        call this%updateOpenNodes()
+    end subroutine
+
+    subroutine updateOpenNodes(this)
+        class(mtln_t) :: this
+        integer(kind=4) :: i, b, c, n
+        do i = 1, size(this%network_manager%open_nodes)
+            b = this%network_manager%open_nodes(i)%bundle_number
+            if (this%bundles(b)%bundle_in_layer) then
+                c = this%network_manager%open_nodes(i)%conductor_number
+                if (this%network_manager%open_nodes(i)%isOpen) then
+                    if (this%network_manager%open_nodes(i)%side == TERMINAL_NODE_SIDE_INI) then
+                        this%bundles(b)%v(c,1) = this%bundles(b)%v(c,1) - 2*dot_product(this%bundles(b)%i_diff(1,c,:), this%bundles(b)%i(:,1))
+                    else if (this%network_manager%open_nodes(i)%side == TERMINAL_NODE_SIDE_END) then
+                        n = this%bundles(b)%number_of_divisions
+                        this%bundles(b)%v(c,n+1) = this%bundles(b)%v(c,n+1) + 2*dot_product(this%bundles(b)%i_diff(n,c,:), this%bundles(b)%i(:,n))
                     end if
-                end do
-            end do
-        end if
+                end if
+            end if
+        end do
     end subroutine
 
     subroutine advanceBundlesCurrent(this)
         class(mtln_t) :: this
-        integer :: i
-#ifdef CompileWithMPI
-        integer :: ierr
-        call mpi_barrier(subcomm_mpi, ierr)
-#endif
+        integer(kind=4) :: i
         do i = 1, this%number_of_bundles
-            if (this%bundles(i)%bundle_in_layer) call this%bundles(i)%advanceCurrent()
-
+            if (this%bundles(i)%bundle_in_layer) then 
+                call this%bundles(i)%advanceCurrent()
+            end if
         end do
     end subroutine
 
@@ -213,7 +243,7 @@ contains
 
     subroutine updateProbes(this)
         class(mtln_t) :: this
-        integer :: i, j
+        integer(kind=4) :: i, j
         do i = 1, this%number_of_bundles
             if (size(this%bundles(i)%probes) /= 0 .and. this%bundles(i)%bundle_in_layer) then 
                 do j = 1, size(this%bundles(i)%probes)
@@ -227,8 +257,8 @@ contains
 
     function getTimeRange(this, time) result(res)
         class(mtln_t) :: this
-        real(kind=RKIND_TIEMPO), intent(in), optional :: time
-        integer :: res
+        real(kind=RKIND_TIME), intent(in), optional :: time
+        integer(kind=4) :: res
         if (present(time)) then 
             res =  floor(time / this%dt)
         else
@@ -238,8 +268,8 @@ contains
 
     subroutine updateBundlesTimeStep(this, dt)
         class(mtln_t) :: this
-        real(kind=RKIND_TIEMPO) :: dt
-        integer :: i
+        real(kind=RKIND_TIME) :: dt
+        integer(kind=4) :: i
         do i = 1, this%number_of_bundles
             this%bundles(i)%dt = dt
         end do
@@ -247,14 +277,23 @@ contains
 
     subroutine updatePULTerms(this)
         class(mtln_t) :: this
-        integer :: i, j 
+        integer(kind=4) :: i, j, k
+        integer(kind=4), dimension(:), allocatable :: all_conductors, voltage_conductors
         do i = 1, this%number_of_bundles
             if (this%bundles(i)%bundle_in_layer) then
                 call this%bundles(i)%updateLRTerms()
                 call this%bundles(i)%updateCGTerms()
+                all_conductors = [(k, k = 1, this%bundles(i)%number_of_conductors)]
+                if (this%full_wave) then
+                    ! Conductors acting as shields of nested cables have no
+                    ! surrounding shield and are not reported by voltage probes.
+                    voltage_conductors = pack(all_conductors, .not. this%bundles(i)%conductor_is_shield)
+                else
+                    voltage_conductors = all_conductors
+                end if
                 do j = 1, size(this%bundles(i)%probes)
                     call this%bundles(i)%probes(j)%resizeFrames(this%getTimeRange(this%final_time), & 
-                                                                this%bundles(i)%number_of_conductors)
+                                                                all_conductors, voltage_conductors)
                 end do
             end if
         end do
@@ -264,9 +303,9 @@ contains
 
     subroutine runUntil(this, final_time)
         class(mtln_t) :: this
-        real(kind=RKIND_TIEMPO), intent(in):: final_time
-        real(kind=RKIND_TIEMPO) :: time
-        integer :: i
+        real(kind=RKIND_TIME), intent(in):: final_time
+        real(kind=RKIND_TIME) :: time
+        integer(kind=4) :: i
 
         do i = 0, this%getTimeRange(final_time)
             call this%advanceBundlesVoltage()
@@ -281,8 +320,8 @@ contains
 
     subroutine mtln_run(this)
         class(mtln_t) :: this
-        real(kind=RKIND_TIEMPO) :: time
-        integer :: i
+        real(kind=RKIND_TIME) :: time
+        integer(kind=4) :: i
 
         do i = 0, this%getTimeRange(this%final_time)
             call this%advanceBundlesVoltage()
@@ -295,32 +334,74 @@ contains
 
     end subroutine
 
-    subroutine mtln_initObservation(this, nEntradaRoot)
+    subroutine mtln_initObservation(this, nInputRoot)
         class(mtln_t) :: this
-        character(len=*), intent(in) :: nEntradaRoot
-        integer :: i, j, k, unit
+        character(len=*), intent(in) :: nInputRoot
+        integer(kind=4) :: close_ios, i, ios, j, k, unit
         character(len=bufsize) :: path
         character(len=bufsize) :: temp
         character(len=:), allocatable :: buffer
+#ifdef CompileWithMPI
+        integer(kind=4) :: candidate_rank, ierr, rank, writer_rank
+#endif
 
         if (.not. allocated(this%bundles)) return
-        unit = 2000
+#ifdef CompileWithMPI
+        call MPI_Comm_rank(SUBCOMM_MPI, rank, ierr)
+        if (ierr /= MPI_SUCCESS) rank = -2
+#endif
         do i = 1, size(this%bundles)
             do j = 1, size(this%bundles(i)%probes)
+                path = mtln_probe_data_path(nInputRoot, this%bundles(i)%probes(j)%name)
+                this%bundles(i)%probes(j)%output_path = trim(path)
+                this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_DECLARED
+                this%bundles(i)%probes(j)%output_diagnostic = ''
+                this%bundles(i)%probes(j)%output_is_open = .false.
 #ifdef CompileWithMPI
-                if (.not. this%bundles(i)%probes(j)%in_layer) cycle
-#endif          
+                candidate_rank = huge(candidate_rank)
+                if (this%bundles(i)%bundle_in_layer .and. this%bundles(i)%probes(j)%in_layer) candidate_rank = rank
+                call MPI_Allreduce(candidate_rank, writer_rank, 1, MPI_INTEGER, MPI_MIN, SUBCOMM_MPI, ierr)
+                if (ierr /= MPI_SUCCESS .or. writer_rank == huge(writer_rank)) writer_rank = -1
+                this%bundles(i)%probes(j)%output_writer_rank = writer_rank
+                this%bundles(i)%probes(j)%output_writer = rank == writer_rank
+#else
+                this%bundles(i)%probes(j)%output_writer_rank = 0
+                this%bundles(i)%probes(j)%output_writer = .true.
+#endif
+                if (.not. this%bundles(i)%probes(j)%output_writer) cycle
+                call create_file_with_path(path, ios)
+                if (ios /= 0) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_FAILED
+                    this%bundles(i)%probes(j)%output_diagnostic = 'Unable to create MTLN probe output'
+                    cycle
+                end if
+                open(newunit=unit, file=trim(path), status='old', action='write', iostat=ios)
+                if (ios /= 0) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_FAILED
+                    this%bundles(i)%probes(j)%output_diagnostic = 'Unable to open MTLN probe output'
+                    cycle
+                end if
                 this%bundles(i)%probes(j)%unit = unit
-                path = trim(trim(nEntradaRoot)//"_"//trim(this%bundles(i)%probes(j)%name)//".dat")
-                open (unit=unit, file=trim(path))
+                this%bundles(i)%probes(j)%output_is_open = .true.
                 write (*, *) 'name: ', trim(this%bundles(i)%probes(j)%name)
                 buffer = "time"
                 do k = 1, size(this%bundles(i)%probes(j)%val, 2)
-                    write (temp, *) k
+                    write (temp, *) this%bundles(i)%probes(j)%conductors(k)
                     buffer = buffer//" "//"conductor_"//trim(adjustl(temp))
                 end do
-                write (unit, '(a)') trim(buffer)
-                unit = unit + 1
+                write (unit, '(a)', iostat=ios) trim(buffer)
+                if (ios /= 0) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_FAILED
+                    this%bundles(i)%probes(j)%output_diagnostic = 'Unable to write MTLN probe header'
+                    close(unit, iostat=close_ios)
+                    this%bundles(i)%probes(j)%output_is_open = .false.
+                    if (close_ios /= 0) then
+                        this%bundles(i)%probes(j)%output_diagnostic = &
+                            'Unable to close MTLN probe output after header failure'
+                    end if
+                    cycle
+                end if
+                this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_ACTIVE
             end do
         end do
     end subroutine
@@ -328,10 +409,8 @@ contains
     subroutine mtln_updateObservation(this, step)
         class(mtln_t) :: this
         integer, intent(in) :: step
-        integer :: i, j, k, n
-        integer :: unit
+        integer(kind=4) :: i, ios, j, n
         character(len=bufsize) :: temp
-        character(len=bufsize) :: path
         character(len=:), allocatable :: buffer
 #ifdef CompileWithMPI
         integer(kind=4) :: ierr
@@ -340,8 +419,10 @@ contains
         do i = 1, size(this%bundles)
             do j = 1, size(this%bundles(i)%probes)
 #ifdef CompileWithMPI
-                if (.not. this%bundles(i)%probes(j)%in_layer) cycle
-#endif          
+                if (.not. this%bundles(i)%probes(j)%output_writer) cycle
+#endif
+                if (this%bundles(i)%probes(j)%output_state /= MTLN_PROBE_OUTPUT_ACTIVE .or. &
+                    .not. this%bundles(i)%probes(j)%output_is_open) cycle
                 buffer = ""
                 write(temp, *) this%bundles(i)%probes(j)%t(1)
                 buffer = buffer//trim(temp)
@@ -349,24 +430,42 @@ contains
                     write (temp, *) this%bundles(i)%probes(j)%val(1, n)
                     buffer = buffer//" "//trim(temp)
                 end do
-                write (this%bundles(i)%probes(j)%unit, '(a)') trim(buffer)
+                write (this%bundles(i)%probes(j)%unit, '(a)', iostat=ios) trim(buffer)
+                if (ios /= 0) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_FAILED
+                    this%bundles(i)%probes(j)%output_diagnostic = 'Unable to write MTLN probe output'
+                end if
             end do
         end do
     end subroutine
 
     subroutine mtln_closeObservation(this)
         class(mtln_t) :: this
-        integer :: i, j
+        integer(kind=4) :: i, ios, j
         if (.not. allocated(this%bundles)) return
         do i = 1, size(this%bundles)
             do j = 1, size(this%bundles(i)%probes)
 #ifdef CompileWithMPI
-                if (.not. this%bundles(i)%probes(j)%in_layer) cycle
-#endif          
-                close(this%bundles(i)%probes(j)%unit)
+                if (.not. this%bundles(i)%probes(j)%output_writer) cycle
+#endif
+                if (.not. this%bundles(i)%probes(j)%output_is_open) cycle
+                close(this%bundles(i)%probes(j)%unit, iostat=ios)
+                this%bundles(i)%probes(j)%output_is_open = .false.
+                if (ios /= 0) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_FAILED
+                    this%bundles(i)%probes(j)%output_diagnostic = 'Unable to close MTLN probe output'
+                else if (this%bundles(i)%probes(j)%output_state /= MTLN_PROBE_OUTPUT_FAILED) then
+                    this%bundles(i)%probes(j)%output_state = MTLN_PROBE_OUTPUT_COMPLETE
+                end if
             end do
       end do
     end subroutine
 
-    
+    function mtln_probe_data_path(root, name) result(data_path)
+        character(len=*), intent(in) :: root, name
+        character(len=BUFSIZE) :: data_path
+
+        data_path = trim(root)//'_'//trim(name)//'.dat'
+    end function mtln_probe_data_path
+
 end module mtln_solver_m

@@ -7,10 +7,10 @@ integer function test_mtl_bundle_init() bind(C) result(error_cnt)
     type(mtl_bundle_t) :: bundle
     type(transmission_line_level_t), dimension(2) :: levels
 
-    real(kind=rkind),dimension(1,1) :: l1 = reshape( source = [ 4.4712610E-07_rkind ], shape = [ 1,1 ] )
-    real(kind=rkind),dimension(1,1) :: c1 = reshape( source = [ 2.242e-10_rkind ], shape = [ 1,1 ] )
-    real(kind=rkind),dimension(1,1) :: r1 = reshape( source = [ 0.0_rkind ], shape = [ 1,1 ] )
-    real(kind=rkind),dimension(1,1) :: g1 = reshape( source = [ 0.0_rkind ], shape = [ 1,1 ] )
+    real(kind=rkind),dimension(1,1) :: l1 = reshape(source = [ 4.4712610E-07_rkind ], shape = [ 1,1 ])
+    real(kind=rkind),dimension(1,1) :: c1 = reshape(source = [ 2.242e-10_rkind ], shape = [ 1,1 ])
+    real(kind=rkind),dimension(1,1) :: r1 = reshape(source = [ 0.0_rkind ], shape = [ 1,1 ])
+    real(kind=rkind),dimension(1,1) :: g1 = reshape(source = [ 0.0_rkind ], shape = [ 1,1 ])
 
     integer :: i
     real(kind=rkind), dimension(5) :: step_size = [20.0_rkind, 20.0_rkind, 20.0_rkind, 20.0_rkind, 20.0_rkind]
@@ -37,7 +37,7 @@ integer function test_mtl_bundle_init() bind(C) result(error_cnt)
                     step_size, &
                     name = "line_in", &
                     segments = segments, &
-                    dt = 1e-11_RKIND_TIEMPO, & 
+                    dt = 1e-11_RKIND_TIME, & 
                     parent_name = "line_out", &
                     conductor_in_parent = 1, &
                     transfer_impedance = Zt)
@@ -46,7 +46,7 @@ integer function test_mtl_bundle_init() bind(C) result(error_cnt)
                     step_size, &
                     name = "line_out", &
                     segments = segments, &
-                    dt = 1e-11_RKIND_TIEMPO, &
+                    dt = 1e-11_RKIND_TIME, &
                     multipolar_expansion = mE, &
                     radius = 0.0_rkind )
 
@@ -68,4 +68,24 @@ integer function test_mtl_bundle_init() bind(C) result(error_cnt)
     end if
     !check size of pul matrices and V I vectors
 
+end function
+
+integer function test_mtl_bundle_generator() bind(C) result(error_cnt)
+    use FDETYPES_m, only: RKIND
+    use mtl_bundle_m, only: mtl_bundle_t
+    use mtln_types_m, only: SOURCE_TYPE_CURRENT
+    implicit none
+
+    type(mtl_bundle_t) :: bundle
+
+    error_cnt = 0
+    allocate(bundle%generators(0))
+    allocate(bundle%rpul(3, 1, 1), source=0.0_rkind)
+    allocate(bundle%du(3, 1, 1), source=2.0_rkind)
+
+    call bundle%addGenerator(2, 1, SOURCE_TYPE_CURRENT, 4.0_rkind, &
+                             './testData/cases/planewave/gauss_1GHz.exc')
+
+    if (size(bundle%generators) /= 1) error_cnt = error_cnt + 1
+    if (bundle%rpul(2, 1, 1) /= 2.0_rkind) error_cnt = error_cnt + 1
 end function

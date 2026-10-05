@@ -1,10 +1,10 @@
 integer function test_read_sphere() bind (C) result(err)
    use smbjson_m
-   use smbjson_testingTools
+   use smbjson_testingTools_m
 
    implicit none
 
-   character(len=*),parameter :: filename = PATH_TO_TEST_DATA//INPUT_EXAMPLES//'sphere.fdtd.json'
+   character(len=*),parameter :: FILENAME = PATH_TO_TEST_DATA//INPUT_EXAMPLES//'sphere.fdtd.json'
    type(Parseador_t) :: pr, ex
    type(parser_t) :: parser
    logical :: areSame
@@ -52,8 +52,8 @@ contains
       ex%despl%mz2 = 80
 
       ! Expected boundaries.
-      ex%front%tipoFrontera(:) = F_PML
-      ex%front%propiedadesPML(:)%numCapas = 10
+      ex%front%boundaryType(:) = F_PML
+      ex%front%propiedadesPML(:)%numLayers = 10
       ex%front%propiedadesPML(:)%orden = 2
       ex%front%propiedadesPML(:)%refl = 0.001_RKIND
 
@@ -65,7 +65,7 @@ contains
 
       ! Expected sources.
       allocate(ex%plnSrc%collection(1))
-      ex%plnSrc%collection(1)%nombre_fichero = "gauss.exc"
+      ex%plnSrc%collection(1)%sourceFileName = "gauss.exc"
       ex%plnSrc%collection(1)%atributo = "LOCKED"
       ex%plnSrc%collection(1)%coor1 = [0, 0, 0]
       ex%plnSrc%collection(1)%coor2 = [79, 79, 79]
@@ -94,7 +94,7 @@ contains
       ex%oldSonda%probes(1)%FarField(1)%probe%tstep = 0.0_RKIND
       ex%oldSonda%probes(1)%FarField(1)%probe%fstart = 1e6_RKIND
       ex%oldSonda%probes(1)%FarField(1)%probe%fstop = 1e9_RKIND
-      ex%oldSonda%probes(1)%FarField(1)%probe%fstep = (1e9_RKIND-1e6_RKIND)/5
+      ex%oldSonda%probes(1)%FarField(1)%probe%fstep = (1e9_RKIND-1e6_RKIND)/4
       ex%oldSONDA%probes(1)%FarField(1)%probe%FileNormalize = "gauss.exc"
       allocate(ex%oldSonda%probes(1)%FarField(1)%probe%i(2))
       allocate(ex%oldSonda%probes(1)%FarField(1)%probe%j(2))
@@ -125,7 +125,7 @@ contains
       ex%VolPrb%collection(1)%cordinates(1)%Ye = 77
       ex%VolPrb%collection(1)%cordinates(1)%Zi = 2
       ex%VolPrb%collection(1)%cordinates(1)%Ze = 77
-      ex%VolPrb%collection(1)%cordinates(1)%or = iExC
+      ex%VolPrb%collection(1)%cordinates(1)%or = IEXC
       ex%VolPrb%collection(1)%cordinates(1)%xtrancos = 1
       ex%VolPrb%collection(1)%cordinates(1)%ytrancos = 1
       ex%VolPrb%collection(1)%cordinates(1)%ztrancos = 1
@@ -141,4 +141,3 @@ contains
       ex%VolPrb%collection(1)%type2 = NP_T2_TIME
    end function
 end function
-

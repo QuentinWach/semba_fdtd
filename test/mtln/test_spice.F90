@@ -1,11 +1,11 @@
 integer function test_spice_read_message() bind(C) result(error_cnt)    
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
-    real(kind=rkind) :: result(4)
+    real(kind=rkind) :: resultValue(4)
     character(50), dimension(:), allocatable :: input
     integer :: i
     type(string_t), dimension(4) :: names
@@ -31,14 +31,15 @@ integer function test_spice_read_message() bind(C) result(error_cnt)
     call circuit%init(names=names)
     call circuit%readInput(input)
     call circuit%step()
+    call circuit%updateNodes()
 
-    result = [24.000000000000000, 9.7469741675197206, 15.000000000000000, 24.000000000000000]
+    resultValue = [24.000000000000000, 9.7469741675197206, 15.000000000000000, 24.000000000000000]
     if (size(circuit%nodes%values) /= 4) then 
         error_cnt = error_cnt + 1
     end if
 
     do i = 1, 4                      
-        if (checkNear(circuit%nodes%values(i)%voltage, result(i), 0.01_rkind) .eqv. .false. ) then 
+        if (checkNear(circuit%nodes%values(i)%voltage, resultValue(i), 0.01_rkind) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
@@ -48,12 +49,12 @@ end function
 integer function test_spice_dc() bind(C) result(error_cnt)    
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
     character(len=50) :: netlist
-    real(kind=rkind) :: result(4)
+    real(kind=rkind) :: resultValue(4)
     integer :: i
     type(string_t), dimension(4) :: names
     names(1) = string_t("node1", 5)
@@ -66,14 +67,15 @@ integer function test_spice_dc() bind(C) result(error_cnt)
     netlist = PATH_TO_TEST_DATA//'netlists/netlist_dc.cir'
     call circuit%init(names = names, netlist = netlist)
     call circuit%step()
+    call circuit%updateNodes()
 
-    result = [24.000000000000000, 9.7469741675197206, 15.000000000000000, 24.000000000000000]
+    resultValue = [24.000000000000000, 9.7469741675197206, 15.000000000000000, 24.000000000000000]
     if (size(circuit%nodes%values) /= 4) then 
         error_cnt = error_cnt + 1
     end if
 
     do i = 1, 4                      
-        if (checkNear(circuit%nodes%values(i)%voltage, result(i), 0.01_rkind) .eqv. .false. ) then 
+        if (checkNear(circuit%nodes%values(i)%voltage, resultValue(i), 0.01_rkind) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
@@ -83,13 +85,13 @@ end function
 integer function test_spice_tran() bind(C) result(error_cnt)    
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
-    character(len=*, kind=c_char), parameter :: netlist= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran.cir'
-    real(kind=RKIND_TIEMPO) :: finalTime
-    real(kind=rkind) :: result(3)
+    character(len=*, kind=c_char), parameter :: NETLIST= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran.cir'
+    real(kind=RKIND_TIME) :: finalTime
+    real(kind=rkind) :: resultValue(3)
     integer :: i
     type(string_t), dimension(4) :: names
     names(1) = string_t("in", 2)
@@ -97,7 +99,7 @@ integer function test_spice_tran() bind(C) result(error_cnt)
     names(3) = string_t("out", 3)
     names(4) = string_t("time", 4)
 
-    result = [5.0,0.092995181699999999,0.053166680000000001]
+    resultValue = [5.0,0.092995181699999999,0.053166680000000001]
 
     circuit%time = 0.0
     circuit%dt = 50e-6
@@ -108,18 +110,18 @@ integer function test_spice_tran() bind(C) result(error_cnt)
     call circuit%setStopTimes(finalTime, circuit%dt)
     do while (circuit%time < finalTime)
         call circuit%step()
-        circuit%time = circuit%time + circuit%dt
-        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_rkind_tiempo) .eqv. .false. ) then 
+        call circuit%updateNodes()
+        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_RKIND_TIME) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
-    if (checkNear(circuit%getNodeVoltage("in"), result(1), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("in"), resultValue(1), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("int"), result(2), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("int"), resultValue(2), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("out"), result(3), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("out"), resultValue(3), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
 
@@ -130,21 +132,21 @@ end function
 integer function test_spice_tran_2() bind(C) result(error_cnt)    
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
-    character(len=*, kind=c_char), parameter :: netlist= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran_2.cir'
-    real(kind=RKIND_TIEMPO) :: finalTime
+    character(len=*, kind=c_char), parameter :: NETLIST= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran_2.cir'
+    real(kind=RKIND_TIME) :: finalTime
     integer :: i
-    real(kind=rkind) :: result(3)
+    real(kind=rkind) :: resultValue(3)
     type(string_t), dimension(4) :: names
     names(1) = string_t("in", 2)
     names(2) = string_t("int", 3)
     names(3) = string_t("out", 3)
     names(4) = string_t("time", 4)
     
-    result = [5.0_rkind,0.0039656539400000001_rkind,0.00069279532199999997_rkind]
+    resultValue = [5.0_rkind,0.0039656539400000001_rkind,0.00069279532199999997_rkind]
     
     circuit%time = 0.0
     circuit%dt = 50e-6
@@ -155,18 +157,18 @@ integer function test_spice_tran_2() bind(C) result(error_cnt)
     call circuit%setStopTimes(finalTime, circuit%dt)
     do while (circuit%time < finalTime)
         call circuit%step()
-        circuit%time = circuit%time + circuit%dt
-        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_rkind_tiempo) .eqv. .false. ) then 
+        call circuit%updateNodes()
+        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_RKIND_TIME) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
-    if (checkNear(circuit%getNodeVoltage("in"), result(1), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("in"), resultValue(1), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("int"), result(2), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("int"), resultValue(2), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("out"), result(3), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("out"), resultValue(3), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
 
@@ -176,15 +178,16 @@ end function
 integer function test_spice_current_source() bind(C) result(error_cnt)    
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
     character(len=50) :: netlist
-    real(kind=RKIND_TIEMPO) :: finalTime
+    real(kind=RKIND_TIME) :: finalTime
     real(kind=rkind) ::resistance
     integer :: i
-    real(kind=rkind) :: current
+    real(kind=rkind) :: current, voltage
+    character(50) :: sCurrent
     type(string_t), dimension(1) :: names
     names(1) = string_t("1_initial", 9)
 
@@ -200,10 +203,12 @@ integer function test_spice_current_source() bind(C) result(error_cnt)
     call circuit%init(names = names, netlist = netlist)
     call circuit%setStopTimes(finalTime, circuit%dt)
     do while (circuit%time < finalTime)
-        call circuit%updateNodeCurrent("1_initial", current)
+        write(sCurrent, *) current
+        call command("alter @I1_initial[dc]="//trim(sCurrent) // c_null_char)
         call circuit%step()
-        circuit%time = circuit%time + circuit%dt
-        if (checkNear(circuit%getNodeVoltage("1_initial"), current*resistance, 0.01_rkind) .eqv. .false. ) then 
+        call circuit%updateNodes()
+        voltage = circuit%getNodeVoltage("1_initial")
+        if (checkNear(voltage, current*resistance, 0.01_rkind) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
         current = 2.0*current
@@ -214,13 +219,13 @@ end function
 integer function test_spice_multiple() bind(C) result(error_cnt)
 
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
     
     type(circuit_t) :: circuit
     character(len=50) :: netlist
-    real(kind=RKIND_TIEMPO) :: dt= 50e-6
-    real(kind=RKIND_TIEMPO) :: finalTime = 200e-6
+    real(kind=RKIND_TIME) :: dt= 50e-6
+    real(kind=RKIND_TIME) :: finalTime = 200e-6
     type(string_t), dimension(7) :: names
     names(1) = string_t("n1_in", 4)
     names(2) = string_t("n1_int", 5)
@@ -240,8 +245,8 @@ integer function test_spice_multiple() bind(C) result(error_cnt)
     call circuit%setStopTimes(finalTime, dt)
     do while (circuit%time < finalTime)
         call circuit%step()
-        circuit%time = circuit%time + circuit%dt
-        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_rkind_tiempo) .eqv. .false. ) then 
+        call circuit%updateNodes()
+        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_RKIND_TIME) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
@@ -252,13 +257,13 @@ end function
 
 integer function test_spice_stop_mod_times() bind(C) result(error_cnt)
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
 
     type(circuit_t) :: circuit
-    character(len=*, kind=c_char), parameter :: netlist= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran.cir'
-    real(kind=RKIND_TIEMPO) :: finalTime
-    real(kind=rkind) :: result(3)
+    character(len=*, kind=c_char), parameter :: NETLIST= PATH_TO_TEST_DATA//c_char_'netlists/netlist_tran.cir'
+    real(kind=RKIND_TIME) :: finalTime
+    real(kind=rkind) :: resultValue(3)
     integer :: i
     type(string_t), dimension(4) :: names
     names(1) = string_t("in", 2)
@@ -266,7 +271,7 @@ integer function test_spice_stop_mod_times() bind(C) result(error_cnt)
     names(3) = string_t("out", 3)
     names(4) = string_t("time", 4)
 
-    result = [5.0,0.092995181699999999,0.053166680000000001]
+    resultValue = [5.0,0.092995181699999999,0.053166680000000001]
 
     circuit%time = 0.0
     circuit%dt = 50e-6
@@ -277,18 +282,18 @@ integer function test_spice_stop_mod_times() bind(C) result(error_cnt)
     call circuit%setModStopTimes(circuit%dt)
     do while (circuit%time < finalTime)
         call circuit%step()
-        circuit%time = circuit%time + circuit%dt
-        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_rkind_tiempo) .eqv. .false. ) then 
+        call circuit%updateNodes()
+        if (checkNear_time(circuit%getTime(), circuit%time, 0.01_RKIND_TIME) .eqv. .false.) then 
             error_cnt = error_cnt + 1
         end if
     end do
-    if (checkNear(circuit%getNodeVoltage("in"), result(1), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("in"), resultValue(1), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("int"), result(2), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("int"), resultValue(2), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
-    if (checkNear(circuit%getNodeVoltage("out"), result(3), 0.01_rkind) .eqv. .false. ) then 
+    if (checkNear(circuit%getNodeVoltage("out"), resultValue(3), 0.01_rkind) .eqv. .false.) then 
         error_cnt = error_cnt + 1
     end if
 
@@ -299,11 +304,11 @@ end function
 
 integer function test_load_codemodels() bind(C) result(error_cnt)
     use circuit_m
-    use mtln_testingTools_mod
+    use mtln_testingTools_m
     implicit none
     type(circuit_t) :: circuit
     type(string_t), dimension(7) :: names
-    character(len=*, kind=c_char), parameter :: netlist= PATH_TO_TEST_DATA//c_char_'netlists/saturation.cir'
+    character(len=*, kind=c_char), parameter :: NETLIST= PATH_TO_TEST_DATA//c_char_'netlists/saturation.cir'
     names(1) = string_t("wire1_1_initial_R", 17)
     names(2) = string_t("wire1_1_initial", 15)
     names(3) = string_t("wire1_1_initial_S", 17)

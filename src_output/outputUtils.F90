@@ -1,0 +1,843 @@
+module outputUtils_m
+   use FDETYPES_m
+   use outputTypes_m
+   use domain_m
+   use report_m
+   implicit none
+   integer(kind=SINGLE), parameter :: FILE_UNIT = 400
+
+   private
+
+   !===========================
+   !  Public interface summary
+   !===========================
+   public :: new_cell_coordinate
+   public :: get_coordinates_extension
+   public :: get_prefix_extension
+   public :: get_field_component
+   public :: get_field_reference
+   public :: init_frequency_slice
+   public :: getBlockCurrentDirection
+   public :: isPEC
+   public :: isPML
+   public :: isSplitOrAdvanced
+   public :: isThinWire
+   public :: isMediaVacuum
+   public :: isWithinBounds
+   public :: isSurface
+   public :: isFlush
+   public :: computej
+   public :: computeJ1
+   public :: computeJ2
+   public :: fieldo
+   public :: create_data_file
+   public :: currentType
+   public :: getMediaIndex
+   public :: get_media_from_coord_and_h_neighbours
+   public :: get_output_tag_number
+   public :: get_output_media_type
+   public :: get_volumetric_classification_field
+   !===========================
+
+   !===========================
+   !  Private interface summary
+   !===========================
+   private :: get_rotated_prefix
+   private :: prefix
+   private :: get_probe_coords_extension
+   private :: get_probe_bounds_coords_extension
+   private :: get_delta
+   !===========================
+
+   interface get_coordinates_extension
+      module procedure get_probe_coords_extension, get_probe_bounds_coords_extension
+   end interface get_coordinates_extension
+
+contains
+   function new_cell_coordinate(x, y, z) result(cell)
+      integer(kind=SINGLE), intent(in) :: x, y, z
+      type(cell_coordinate_t) :: cell
+
+      cell%x = x
+      cell%y = y
+      cell%z = z
+   end function new_cell_coordinate
+
+   function getMediaIndex(field, i, j, k, CoordToMaterial) result(res)
+      integer, intent(in) :: field, i, j, k
+      type(media_matrices_t), pointer, intent(in) :: CoordToMaterial
+
+      integer :: res
+
+      select case (field)
+      case (IEX); res = CoordToMaterial%sggMiEx(i, j, k)
+      case (IEY); res = CoordToMaterial%sggMiEy(i, j, k)
+      case (IEZ); res = CoordToMaterial%sggMiEz(i, j, k)
+      case (IHX); res = CoordToMaterial%sggMiHx(i, j, k)
+      case (IHY); res = CoordToMaterial%sggMiHy(i, j, k)
+      case (IHZ); res = CoordToMaterial%sggMiHz(i, j, k)
+      end select
+
+   end function
+
+   subroutine get_media_from_coord_and_h_neighbours(field, i, j, k, CoordToMaterial, media, firstPositiveMedia, firstNegativeMedia, secondPositiveMedia, secondNegativeMedia)
+      !Returns field media and Hmedia from borders of i,j,k
+      type(media_matrices_t), pointer, intent(in) :: CoordToMaterial
+      integer(4), intent(in) :: field, i, j, k
+      integer(4), intent(out) :: media, firstPositiveMedia, firstNegativeMedia, secondPositiveMedia, secondNegativeMedia
+      integer, parameter :: NFIELDS = 3
+
+      ! Precomputed shifts for first direction
+      integer, dimension(NFIELDS) :: shift_i = [0, -1, 0]
+      integer, dimension(NFIELDS) :: shift_j = [0, 0, -1]
+      integer, dimension(NFIELDS) :: shift_k = [-1, 0, 0]
+
+      ! Precomputed shifts for second direction
+      integer, dimension(NFIELDS) :: shift_i2 = [0, 0, -1]
+      integer, dimension(NFIELDS) :: shift_j2 = [-1, 0, 0]
+      integer, dimension(NFIELDS) :: shift_k2 = [0, -1, 0]
+
+      ! Precomputed neighbor hfield types
+      integer, dimension(NFIELDS) :: HFieldTable = [IHY, IHZ, IHX]  ! returns perpendicular field tags from H
+
+      ! Main mediua
+      media = getMediaIndex(field, i, j, k, CoordToMaterial)
+
+      ! Neighboring media
+      !First Direction
+      firstPositiveMedia = getMediaIndex(HFieldTable(field), i, j, k, CoordToMaterial)
+ firstNegativeMedia = getMediaIndex(HFieldTable(field), i + shift_i(field), j + shift_j(field), k + shift_k(field), CoordToMaterial)
+
+      !Second Direction
+      secondPositiveMedia = getMediaIndex(HFieldTable(mod(field, NFIELDS) + 1), i, j, k, CoordToMaterial)
+      secondNegativeMedia = getMediaIndex(HFieldTable(mod(field, NFIELDS) + 1), i + shift_i2(field), j + shift_j2(field), k + shift_k2(field), CoordToMaterial)
+   end subroutine
+
+   function get_probe_coords_extension(coordinates, mpidir) result(ext)
+      type(cell_coordinate_t) :: coordinates
+      integer(kind=SINGLE), intent(in) ::  mpidir
+      character(len=BUFSIZE) :: ext
+      character(len=BUFSIZE)  ::  chari, charj, chark
+
+      write (chari, '(i7)') coordinates%x
+      write (charj, '(i7)') coordinates%y
+      write (chark, '(i7)') coordinates%z
+
+#if CompileWithMPI
+      if (mpidir == 3) then
+         ext = trim(adjustl(chari))//'_'//trim(adjustl(charj))//'_'//trim(adjustl(chark))
+      else if (mpidir == 2) then
+         ext = trim(adjustl(charj))//'_'//trim(adjustl(chark))//'_'//trim(adjustl(chari))
+      else if (mpidir == 1) then
+         ext = trim(adjustl(chark))//'_'//trim(adjustl(chari))//'_'//trim(adjustl(charj))
+      else
+         call stoponerror(0, 0, 'Buggy error in mpidir. ')
+      end if
+#else
+      ext = trim(adjustl(chari))//'_'//trim(adjustl(charj))//'_'//trim(adjustl(chark))
+#endif
+
+      return
+   end function get_probe_coords_extension
+
+   function get_probe_bounds_coords_extension(lowerCoordinates, upperCoordinates, mpidir) result(ext)
+      type(cell_coordinate_t) :: lowerCoordinates, upperCoordinates
+      integer(kind=SINGLE), intent(in) :: mpidir
+      character(len=BUFSIZE) :: ext
+      character(len=BUFSIZE)  ::  chari, charj, chark, chari2, charj2, chark2
+
+      write (chari, '(i7)') lowerCoordinates%x
+      write (charj, '(i7)') lowerCoordinates%y
+      write (chark, '(i7)') lowerCoordinates%z
+
+      write (chari2, '(i7)') upperCoordinates%x
+      write (charj2, '(i7)') upperCoordinates%y
+      write (chark2, '(i7)') upperCoordinates%z
+
+#if CompileWithMPI
+      if (mpidir == 3) then
+         ext = trim(adjustl(chari))//'_'//trim(adjustl(charj))//'_'//trim(adjustl(chark))//'__'// &
+               trim(adjustl(chari2))//'_'//trim(adjustl(charj2))//'_'//trim(adjustl(chark2))
+      else if (mpidir == 2) then
+         ext = trim(adjustl(charj))//'_'//trim(adjustl(chark))//'_'//trim(adjustl(chari))//'__'// &
+               trim(adjustl(charj2))//'_'//trim(adjustl(chark2))//'_'//trim(adjustl(chari2))
+      else if (mpidir == 1) then
+         ext = trim(adjustl(chark))//'_'//trim(adjustl(chari))//'_'//trim(adjustl(charj))//'__'// &
+               trim(adjustl(chark2))//'_'//trim(adjustl(chari2))//'_'//trim(adjustl(charj2))
+      else
+         call stoponerror(0, 0, 'Buggy error in mpidir. ')
+      end if
+#else
+      ext = trim(adjustl(chari))//'_'//trim(adjustl(charj))//'_'//trim(adjustl(chark))//'__'// &
+            trim(adjustl(chari2))//'_'//trim(adjustl(charj2))//'_'//trim(adjustl(chark2))
+#endif
+
+      return
+   end function get_probe_bounds_coords_extension
+
+   function get_prefix_extension(field, mpidir) result(prefixExtension)
+      integer(kind=SINGLE), intent(in)  ::  field, mpidir
+      character(len=BUFSIZE)  ::  prefixExtension
+
+#if CompileWithMPI
+      prefixExtension = get_rotated_prefix(field, mpidir)
+#else
+      prefixExtension = prefix(field)
+#endif
+   end function get_prefix_extension
+
+   function get_rotated_prefix(field, mpidir) result(prefixExtension)
+      integer(kind=SINGLE), intent(in)  ::  field, mpidir
+      character(len=BUFSIZE)  ::  prefixExtension
+      if (mpidir == 3) then
+         select case (field)
+         case (IEX); prefixExtension = prefix(IEX)
+         case (IEY); prefixExtension = prefix(IEY)
+         case (IEZ); prefixExtension = prefix(IEZ)
+         case (IJX); prefixExtension = prefix(IJX)
+         case (IJY); prefixExtension = prefix(IJY)
+         case (IJZ); prefixExtension = prefix(IJZ)
+         case (IQX); prefixExtension = prefix(IQX)
+         case (IQY); prefixExtension = prefix(IQY)
+         case (IQZ); prefixExtension = prefix(IQZ)
+         case (IVX); prefixExtension = prefix(IVX)
+         case (IVY); prefixExtension = prefix(IVY)
+         case (IVZ); prefixExtension = prefix(IVZ)
+         case (IHX); prefixExtension = prefix(IHX)
+         case (IHY); prefixExtension = prefix(IHY)
+         case (IHZ); prefixExtension = prefix(IHZ)
+         case (IBLOQUEJX); prefixExtension = prefix(IBLOQUEJX)
+         case (IBLOQUEJY); prefixExtension = prefix(IBLOQUEJY)
+         case (IBLOQUEJZ); prefixExtension = prefix(IBLOQUEJZ)
+         case (IBLOQUEMX); prefixExtension = prefix(IBLOQUEMX)
+         case (IBLOQUEMY); prefixExtension = prefix(IBLOQUEMY)
+         case (IBLOQUEMZ); prefixExtension = prefix(IBLOQUEMZ)
+         case default; prefixExtension = prefix(field)
+         end select
+      else if (mpidir == 2) then
+         select case (field)
+         case (IEX); prefixExtension = prefix(IEZ)
+         case (IEY); prefixExtension = prefix(IEX)
+         case (IEZ); prefixExtension = prefix(IEY)
+         case (IJX); prefixExtension = prefix(IJZ)
+         case (IJY); prefixExtension = prefix(IJX)
+         case (IJZ); prefixExtension = prefix(IJY)
+         case (IQX); prefixExtension = prefix(IQZ)
+         case (IQY); prefixExtension = prefix(IQX)
+         case (IQZ); prefixExtension = prefix(IQY)
+         case (IVX); prefixExtension = prefix(IVZ)
+         case (IVY); prefixExtension = prefix(IVX)
+         case (IVZ); prefixExtension = prefix(IVY)
+         case (IHX); prefixExtension = prefix(IHZ)
+         case (IHY); prefixExtension = prefix(IHX)
+         case (IHZ); prefixExtension = prefix(IHY)
+         case (IBLOQUEJX); prefixExtension = prefix(IBLOQUEJZ)
+         case (IBLOQUEJY); prefixExtension = prefix(IBLOQUEJX)
+         case (IBLOQUEJZ); prefixExtension = prefix(IBLOQUEJY)
+         case (IBLOQUEMX); prefixExtension = prefix(IBLOQUEMZ)
+         case (IBLOQUEMY); prefixExtension = prefix(IBLOQUEMX)
+         case (IBLOQUEMZ); prefixExtension = prefix(IBLOQUEMY)
+         case default; prefixExtension = prefix(field)
+         end select
+      else if (mpidir == 1) then
+         select case (field)
+         case (IEX); prefixExtension = prefix(IEY)
+         case (IEY); prefixExtension = prefix(IEZ)
+         case (IEZ); prefixExtension = prefix(IEX)
+         case (IJX); prefixExtension = prefix(IJY)
+         case (IJY); prefixExtension = prefix(IJZ)
+         case (IJZ); prefixExtension = prefix(IJX)
+         case (IQX); prefixExtension = prefix(IQY)
+         case (IQY); prefixExtension = prefix(IQZ)
+         case (IQZ); prefixExtension = prefix(IQX)
+         case (IVX); prefixExtension = prefix(IVY)
+         case (IVY); prefixExtension = prefix(IVZ)
+         case (IVZ); prefixExtension = prefix(IVX)
+         case (IHX); prefixExtension = prefix(IHY)
+         case (IHY); prefixExtension = prefix(IHZ)
+         case (IHZ); prefixExtension = prefix(IHX)
+         case (IBLOQUEJX); prefixExtension = prefix(IBLOQUEJY)
+         case (IBLOQUEJY); prefixExtension = prefix(IBLOQUEJZ)
+         case (IBLOQUEJZ); prefixExtension = prefix(IBLOQUEJX)
+         case (IBLOQUEMX); prefixExtension = prefix(IBLOQUEMY)
+         case (IBLOQUEMY); prefixExtension = prefix(IBLOQUEMZ)
+         case (IBLOQUEMZ); prefixExtension = prefix(IBLOQUEMX)
+         case default; prefixExtension = prefix(field)
+         end select
+      else
+         call stoponerror(0, 0, "Buggy error in mpidir.")
+      end if
+      return
+   end function get_rotated_prefix
+
+   function prefix(fieldIndex) result(ext)
+      integer(kind=SINGLE), intent(in)  ::  fieldIndex
+      character(len=BUFSIZE)  ::  ext
+
+      select case (fieldIndex)
+      case (IEX); ext = 'Ex'
+      case (IEY); ext = 'Ey'
+      case (IEZ); ext = 'Ez'
+      case (IVX); ext = 'Vx'
+      case (IVY); ext = 'Vy'
+      case (IVZ); ext = 'Vz'
+      case (IHX); ext = 'Hx'
+      case (IHY); ext = 'Hy'
+      case (IHZ); ext = 'Hz'
+      case (IBLOQUEJX); ext = 'Jx'
+      case (IBLOQUEJY); ext = 'Jy'
+      case (IBLOQUEJZ); ext = 'Jz'
+      case (IBLOQUEMX); ext = 'Mx'
+      case (IBLOQUEMY); ext = 'My'
+      case (IBLOQUEMZ); ext = 'Mz'
+      case (IJX); ext = 'Wx'
+      case (IJY); ext = 'Wy'
+      case (IJZ); ext = 'Wz'
+      case (IQX); ext = 'Qx'
+      case (IQY); ext = 'Qy'
+      case (IQZ); ext = 'Qz'
+      case (IEXC); ext = 'ExC'
+      case (IEYC); ext = 'EyC'
+      case (IEZC); ext = 'EzC'
+      case (IHXC); ext = 'HxC'
+      case (IHYC); ext = 'HyC'
+      case (IHZC); ext = 'HzC'
+      case (IMEC); ext = 'ME'
+      case (IMHC); ext = 'MH'
+      case (ICUR); ext = 'BC'
+      case (MAPVTK); ext = 'MAP'
+      case (ICURX); ext = 'BCX'
+      case (ICURY); ext = 'BCY'
+      case (ICURZ); ext = 'BCZ'
+      case (farfield); ext = 'FF'
+      case (LINEINTEGRAL); ext = 'LI'
+      end select
+      return
+   end function prefix
+
+   function fieldo(field, dir) result(fieldo2)
+      integer  ::  fieldo2, field
+      character(len=1) :: dir
+      fieldo2 = -1
+      select case (field)
+      case (IEX, IEY, IEZ, IHX, IHY, IHZ); fieldo2 = field
+      case (IJX, IVX, IBLOQUEJX, IEXC, IQX); fieldo2 = IEX
+      case (IJY, IVY, IBLOQUEJY, IEYC, IQY); fieldo2 = IEY
+      case (IJZ, IVZ, IBLOQUEJZ, IEZC, IQZ); fieldo2 = IEZ
+      case (IBLOQUEMX, IHXC); fieldo2 = IHX
+      case (IBLOQUEMY, IHYC); fieldo2 = IHY
+      case (IBLOQUEMZ, IHZC); fieldo2 = IHZ
+      case (IMEC)
+         select case (dir)
+         case ('X', 'x'); fieldo2 = IEX
+         case ('Y', 'y'); fieldo2 = IEY
+         case ('Z', 'z'); fieldo2 = IEZ
+         end select
+      case (IMHC)
+         select case (dir)
+         case ('X', 'x'); fieldo2 = IHX
+         case ('Y', 'y'); fieldo2 = IHY
+         case ('Z', 'z'); fieldo2 = IHZ
+         end select
+      case (ICUR, ICURX, ICURY, ICURZ, MAPVTK)  !I set them in efield to avoid problems with MPI
+         select case (dir)
+         case ('X', 'x'); fieldo2 = IEX
+         case ('Y', 'y'); fieldo2 = IEY
+         case ('Z', 'z'); fieldo2 = IEZ
+         end select
+      end select
+   end function
+
+   function get_field_component(fieldId, fieldReference) result(component)
+      type(fields_reference_t), intent(in) :: fieldReference
+      integer(kind=SINGLE), intent(in) :: fieldId
+      real(kind=RKIND), pointer, dimension(:, :, :) :: component
+      select case (fieldId)
+      case (IEX); component => fieldReference%E%x
+      case (IEY); component => fieldReference%E%y
+      case (IEZ); component => fieldReference%E%z
+      case (IHX); component => fieldReference%H%x
+      case (IHY); component => fieldReference%H%y
+      case (IHZ); component => fieldReference%H%z
+      end select
+   end function
+
+   function get_field_reference(fieldId, fieldReference) result(field)
+      type(fields_reference_t), intent(in) :: fieldReference
+      integer(kind=SINGLE), intent(in) :: fieldId
+      type(field_data_t) :: field
+      select case (fieldId)
+      case (IBLOQUEJX, IBLOQUEJY, IBLOQUEJZ)
+         field%x => fieldReference%H%x
+         field%y => fieldReference%H%y
+         field%z => fieldReference%H%z
+
+         field%deltaX => fieldReference%H%deltax
+         field%deltaY => fieldReference%H%deltay
+         field%deltaZ => fieldReference%H%deltaz
+      case (IBLOQUEMX, IBLOQUEMY, IBLOQUEMZ)
+         field%x => fieldReference%E%x
+         field%y => fieldReference%E%y
+         field%z => fieldReference%E%z
+
+         field%deltaX => fieldReference%E%deltax
+         field%deltaY => fieldReference%E%deltay
+         field%deltaZ => fieldReference%E%deltaz
+      end select
+   end function get_field_reference
+
+   subroutine init_frequency_slice(frequencySlice, domain)
+      real(kind=RKIND), dimension(:), intent(out) :: frequencySlice
+      type(domain_t), intent(in) :: domain
+
+      integer(kind=SINGLE) :: i
+
+      if (domain%logarithmicSpacing) then
+         do i = 1, domain%fnum
+            frequencySlice(i) = 10.0_RKIND**(domain%fstart + (i - 1)*domain%fstep)
+         end do
+      else
+         do i = 1, domain%fnum
+            frequencySlice(i) = domain%fstart + (i - 1)*domain%fstep
+         end do
+      end if
+   end subroutine init_frequency_slice
+
+   integer function getBlockCurrentDirection(field)
+      integer(kind=4) :: field
+      select case (field)
+      case (IHX); getBlockCurrentDirection = ICURX
+      case (IHY); getBlockCurrentDirection = ICURY
+      case (IHZ); getBlockCurrentDirection = ICURZ
+      case default; call StopOnError(0, 0, 'field is not H field')
+      end select
+   end function
+
+   logical function isThinWire(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      integer(kind=SINGLE) :: mediaIndex
+
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+      isThinWire = problem%materialList(mediaIndex)%is%ThinWire
+   end function
+
+   logical function isPEC(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      integer(kind=SINGLE) :: mediaIndex
+
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+      isPEC = problem%materialList(mediaIndex)%is%PEC
+   end function
+
+   logical function isPML(field, i, j, k, problem)
+      integer(kind=4) :: field, i, j, k
+      integer(kind=SINGLE) :: mediaIndex
+      type(problem_info_t), intent(in) :: problem
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+      isPML = problem%materialList(mediaIndex)%is%PML
+   end function
+
+   logical function isSurface(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      integer(kind=SINGLE) :: mediaIndex
+
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+      isSurface = problem%materialList(mediaIndex)%is%Surface
+   end function
+
+   logical function isWithinBounds(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      isWithinBounds = (i <= problem%problemDimension(field)%XE) .and. &
+                       (j <= problem%problemDimension(field)%YE) .and. &
+                       (k <= problem%problemDimension(field)%ZE) .and. &
+                       (i >= problem%problemDimension(field)%XI) .and. &
+                       (j >= problem%problemDimension(field)%YI) .and. &
+                       (k >= problem%problemDimension(field)%ZI)
+   end function
+
+   logical function isMediaVacuum(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      integer(kind=INTEGERSIZEOFMEDIAMATRICES) :: mediaIndex
+      integer(kind=INTEGERSIZEOFMEDIAMATRICES), parameter :: VACUUM = 1
+
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+      isMediaVacuum = (mediaIndex == VACUUM)
+   end function
+
+   logical function isSplitOrAdvanced(field, i, j, k, problem)
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(problem_info_t), intent(in) :: problem
+
+      integer(kind=INTEGERSIZEOFMEDIAMATRICES) :: mediaIndex
+      mediaIndex = getMediaIndex(field, i, j, k, problem%geometryToMaterialData)
+
+      isSplitOrAdvanced = problem%materialList(mediaIndex)%is%split_and_useless .or. &
+                          problem%materialList(mediaIndex)%is%already_YEEadvanced_byconformal
+   end function
+
+   function computej(field, i, j, k, fields_reference) result(res)
+      implicit none
+
+      ! Input Arguments
+      integer(kind=single), intent(in) :: field, i, j, k
+      type(fields_reference_t), intent(in) :: fields_reference
+
+      ! Local Variables
+      integer(kind=single) :: i_shift_a, j_shift_a, k_shift_a  ! Shift for Term A (Offset for H/M field)
+      integer(kind=single) :: i_shift_b, j_shift_b, k_shift_b  ! Shift for Term B (Offset for H/M field)
+
+      integer(kind=single) :: curl_component_a                 ! H/M field component for Term A
+      integer(kind=single) :: curl_component_b                 ! H/M field component for Term B
+
+      real(kind=rkind) :: res
+
+      ! -----------------------------------------------------------
+      ! 1. Determine Curl Components
+      !    The MOD 3 operation cyclically maps the E-field to the two required H-field components.
+      ! -----------------------------------------------------------
+
+      ! Component A (The 'next' component in the sequence)
+      curl_component_a = 1 + mod(field + 1, 3)
+
+      ! Component B (The 'current' component in the sequence)
+      curl_component_b = 1 + mod(field, 3)
+
+      ! -----------------------------------------------------------
+      ! 2. Calculate Spatial Shifts (Yee Cell Staggering)
+      !    We use MERGE to apply the (i-1) shift only in the relevant direction.
+      ! -----------------------------------------------------------
+
+      ! Shift for Term A
+      i_shift_a = i - merge(1, 0, curl_component_b == IEX)
+      j_shift_a = j - merge(1, 0, curl_component_b == IEY)
+      k_shift_a = k - merge(1, 0, curl_component_b == IEZ)
+
+      ! Shift for Term B
+      i_shift_b = i - merge(1, 0, curl_component_a == IEX)
+      j_shift_b = j - merge(1, 0, curl_component_a == IEY)
+      k_shift_b = k - merge(1, 0, curl_component_a == IEZ)
+
+      ! -----------------------------------------------------------
+      ! 3. Calculate J (Curl Difference)
+      !    The H/M fields are accessed using an offset (+3) from the E-field index.
+      ! -----------------------------------------------------------
+
+      res = &
+         ! TERM B: (Negative term in the difference)
+         -(get_delta(curl_component_b, i, j, k, fields_reference)* &
+      ( get_field(curl_component_b + 3, i, j, k, fields_reference) - get_field(curl_component_b + 3, i_shift_b, j_shift_b, k_shift_b, fields_reference) ) &
+           ) + &
+         ! TERM A: (Positive term in the difference)
+         (get_delta(curl_component_a, i, j, k, fields_reference)* &
+      ( get_field(curl_component_a + 3, i, j, k, fields_reference) - get_field(curl_component_a + 3, i_shift_a, j_shift_a, k_shift_a, fields_reference) ) &
+          )
+
+   end function computej
+
+   function computeJ1(f, i, j, k, fields_reference) result(res)
+      implicit none
+      integer(kind=4), intent(in) :: f, i, j, k
+      type(fields_reference_t), intent(in) :: fields_reference
+      integer(kind=4) :: c       ! Complementary H-field index (Hy/Hz)
+      real(kind=rkind) :: res
+      real(kind=rkind) :: curl_h_term_a, curl_h_term_b, field_diff_term
+
+      ! Calculate complementary H-field index (e.g., if f=1 (Ex), c=5 (Hy) and c+1=6 (Hz) or vice versa depending on definitions)
+      ! For f=1 (Ex), c = mod(1-2, 3)+4 = mod(-1, 3)+4 = 2+4 = 6 (Hz).
+
+      c = mod(f - 2, 3) + 4 ! This typically corresponds to H_z for J_x, or H_x for J_y, etc.
+
+      ! First set of H-field terms
+      curl_h_term_a = get_delta(c, i, j, k, fields_reference)*get_field(c, i, j, k, fields_reference) + &
+                    get_delta(c, i+u(f,IHY), j+u(f,IHZ), k+u(f,IHX), fields_reference) * get_field(c, i+u(f,IHY), j+u(f,IHZ), k+u(f,IHX), fields_reference)
+
+      ! Second set of H-field terms
+    curl_h_term_b = get_delta(c, i, j, k, fields_reference) * get_field(c, i-u(f,IHX), j-u(f,IHY), k-u(f,IHZ), fields_reference) + &
+                    get_delta(c, i+u(f,IHY), j+u(f,IHZ), k+u(f,IHX), fields_reference) * get_field(c, i-u(f,IHX)+u(f,IHY), j-u(f,IHY)+u(f,IHZ), k-u(f,IHZ)+u(f,IHX), fields_reference)
+
+      ! E-field term (approximates the change in E-field at the J-node)
+      field_diff_term = get_delta(f, i, j, k, fields_reference)*( &
+                        get_field(f, i - u(f, IHY), j - u(f, IHZ), k - u(f, IHX), fields_reference) - &
+                        get_field(f, i + u(f, IHY), j + u(f, IHZ), k + u(f, IHX), fields_reference))
+
+      ! Final computation: J1 = - ((Curl_H_A) - (Curl_H_B) + (E_diff))
+      res = -((curl_h_term_a - curl_h_term_b) + field_diff_term)
+
+   end function computeJ1
+
+   function computeJ2(f, i, j, k, fields_reference) result(res)
+      implicit none
+      integer(kind=4), intent(in) :: f, i, j, k
+      type(fields_reference_t), intent(in) :: fields_reference
+      integer(kind=4) :: c       ! Complementary H-field index (Hx/Hy/Hz)
+      real(kind=rkind) :: res
+      real(kind=rkind) :: curl_h_term_a, curl_h_term_b, field_diff_term
+
+      ! Calculate complementary H-field index (e.g., if f=1 (Ex), c=4 (Hx) or c=5 (Hy))
+      ! For f=1 (Ex), c = mod(1-3, 3)+4 = mod(-2, 3)+4 = 1+4 = 5 (Hy). This is the second H-field curl component.
+      c = mod(f - 3, 3) + 4
+
+      ! First set of H-field terms
+      curl_h_term_a = get_delta(c, i, j, k, fields_reference)*get_field(c, i, j, k, fields_reference) + &
+                    get_delta(c, i+u(f,IHZ), j+u(f,IHX), k+u(f,IHY), fields_reference) * get_field(c, i+u(f,IHZ), j+u(f,IHX), k+u(f,IHY), fields_reference)
+
+      ! Second set of H-field terms
+    curl_h_term_b = get_delta(c, i, j, k, fields_reference) * get_field(c, i-u(f,IHX), j-u(f,IHY), k-u(f,IHZ), fields_reference) + &
+                    get_delta(c, i+u(f,IHZ), j+u(f,IHX), k+u(f,IHY), fields_reference) * get_field(c, i-u(f,IHX)+u(f,IHZ), j-u(f,IHY)+u(f,IHX), k-u(f,IHZ)+u(f,IHY), fields_reference)
+
+      ! E-field term (approximates the change in E-field at the J-node)
+      field_diff_term = get_delta(f, i, j, k, fields_reference)*( &
+                        get_field(f, i - u(f, IHZ), j - u(f, IHX), k - u(f, IHY), fields_reference) - &
+                        get_field(f, i + u(f, IHZ), j + u(f, IHX), k + u(f, IHY), fields_reference))
+
+      ! Final computation: J2 = (Curl_H_A) - (Curl_H_B) + (E_diff)
+      res = (curl_h_term_a - curl_h_term_b) + field_diff_term
+
+   end function computeJ2
+
+   integer function u(field1, field2)
+      integer(kind=4) :: field1, field2
+      if (field1 == field2) then
+         u = 1
+      else
+         u = 0
+      end if
+   end function
+
+   integer function currentType(field)
+      integer(kind=4) :: field
+      select case (field)
+      case (IEX); currentType = IJX
+      case (IEY); currentType = IJY
+      case (IEZ); currentType = IJZ
+      case (IHX); currentType = IBLOQUEJX
+      case (IHY); currentType = IBLOQUEJY
+      case (IHZ); currentType = IBLOQUEJZ
+      case default; call StopOnError(0, 0, 'field is not a E or H field')
+      end select
+   end function
+
+   integer function get_volumetric_classification_field(component, axis)
+      integer(kind=SINGLE), intent(in) :: component
+      integer, intent(in) :: axis
+
+      select case (component)
+      case (ICUR, IMEC)
+         get_volumetric_classification_field = IEX + axis - 1
+      case (IMHC)
+         get_volumetric_classification_field = IHX + axis - 1
+      case (ICURX, IEXC); get_volumetric_classification_field = IEX
+      case (ICURY, IEYC); get_volumetric_classification_field = IEY
+      case (ICURZ, IEZC); get_volumetric_classification_field = IEZ
+      case (IHXC); get_volumetric_classification_field = IHX
+      case (IHYC); get_volumetric_classification_field = IHY
+      case (IHZC); get_volumetric_classification_field = IHZ
+      case default
+         call StopOnError(0, 0, 'Unsupported volumetric classification component')
+      end select
+   end function get_volumetric_classification_field
+
+   integer(IKINDMTAG) function get_output_tag_number(field, position, problemInfo)
+      integer, intent(in) :: field, position(3)
+      type(problem_info_t), intent(in) :: problemInfo
+
+      get_output_tag_number = 0_IKINDMTAG
+      if (.not. associated(problemInfo%materialTag)) return
+      select case (field)
+      case (IEX)
+         if (.not. allocated(problemInfo%materialTag%edge%x)) return
+      case (IEY)
+         if (.not. allocated(problemInfo%materialTag%edge%y)) return
+      case (IEZ)
+         if (.not. allocated(problemInfo%materialTag%edge%z)) return
+      case (IHX)
+         if (.not. allocated(problemInfo%materialTag%face%x)) return
+      case (IHY)
+         if (.not. allocated(problemInfo%materialTag%face%y)) return
+      case (IHZ)
+         if (.not. allocated(problemInfo%materialTag%face%z)) return
+      end select
+      if (field <= IEZ) then
+         get_output_tag_number = problemInfo%materialTag%getEdgeTag(field, position(1), position(2), position(3))
+      else
+         get_output_tag_number = problemInfo%materialTag%getFaceTag(field, position(1), position(2), position(3))
+      end if
+   end function get_output_tag_number
+
+   real(RKIND) function get_output_media_type(field, position, problemInfo)
+      integer, intent(in) :: field, position(3)
+      type(problem_info_t), intent(in) :: problemInfo
+      integer :: media
+
+      media = getMediaIndex(field, position(1), position(2), position(3), &
+                            problemInfo%geometryToMaterialData)
+      if (field <= IEZ) then
+         get_output_media_type = edge_output_media_type(field, position, problemInfo, media)
+      else
+         get_output_media_type = surface_output_media_type(problemInfo%materialList(media), media)
+      end if
+   end function get_output_media_type
+
+   real(RKIND) function surface_output_media_type(material, media)
+      type(MediaData_t), intent(in) :: material
+      integer, intent(in) :: media
+
+      if (material%is%PEC) then
+         surface_output_media_type = 0.0_RKIND
+      else if (material%is%PMC) then
+         surface_output_media_type = 16.0_RKIND
+      else if (material%is%ConformalPec) then
+         surface_output_media_type = 1000.0_RKIND + media
+      else if (material%is%SGBC .or. material%is%Multiport .or. material%is%AnisMultiport) then
+         surface_output_media_type = 300.0_RKIND + media
+      else if (material%is%EDispersive .or. material%is%MDispersive .or. material%is%EDispersiveAnis .or. &
+               material%is%MDispersiveAnis) then
+         surface_output_media_type = 100.0_RKIND + media
+      else if (material%is%ThinSlot) then
+         surface_output_media_type = 400.0_RKIND + media
+      else if (material%is%Lumped) then
+         surface_output_media_type = 500.0_RKIND + media
+      else if (material%is%Dielectric .or. material%is%Anisotropic) then
+         surface_output_media_type = 200.0_RKIND + media
+      else if (material%is%already_YEEadvanced_byconformal) then
+         surface_output_media_type = 5.0_RKIND
+      else if (material%is%split_and_useless) then
+         surface_output_media_type = 6.0_RKIND
+      else
+         surface_output_media_type = -1.0_RKIND
+      end if
+   end function surface_output_media_type
+
+   real(RKIND) function edge_output_media_type(field, position, problemInfo, media)
+      integer, intent(in) :: field, position(3), media
+      type(problem_info_t), intent(in) :: problemInfo
+      integer :: candidate_field, candidate_media, candidate_position(3)
+      type(MediaData_t), pointer :: material
+
+      material => problemInfo%materialList(media)
+      if (material%is%already_YEEadvanced_byconformal) then
+         edge_output_media_type = 5.5_RKIND
+      else if (material%is%split_and_useless) then
+         edge_output_media_type = 6.5_RKIND
+      else if (material%is%PEC) then
+         edge_output_media_type = 0.5_RKIND
+      else if (material%is%PMC) then
+         edge_output_media_type = 16.5_RKIND
+      else if (material%is%ConformalPec) then
+         edge_output_media_type = 2000.0_RKIND + media
+      else if (material%is%SGBC .or. material%is%Multiport .or. material%is%AnisMultiport) then
+         edge_output_media_type = 3.5_RKIND
+      else if (material%is%EDispersive .or. material%is%MDispersive .or. material%is%EDispersiveAnis .or. &
+               material%is%MDispersiveAnis) then
+         edge_output_media_type = 1.5_RKIND
+      else if (material%is%ThinSlot) then
+         edge_output_media_type = 4.5_RKIND
+      else if (material%is%Lumped) then
+         edge_output_media_type = 4.25_RKIND
+      else if (material%is%Dielectric .or. material%is%Anisotropic) then
+         edge_output_media_type = 2.5_RKIND
+      else if (material%is%ThinWire) then
+         edge_output_media_type = 7.0_RKIND
+         if (edge_touches_another_medium(field, position, problemInfo, media)) &
+            edge_output_media_type = 8.0_RKIND
+      else if (material%is%Multiwire) then
+         edge_output_media_type = 12.0_RKIND
+         if (edge_touches_another_medium(field, position, problemInfo, media)) &
+            edge_output_media_type = 13.0_RKIND
+      else
+         edge_output_media_type = -0.5_RKIND
+      end if
+   end function edge_output_media_type
+
+   logical function edge_touches_another_medium(field, position, problemInfo, media)
+      integer, intent(in) :: field, position(3), media
+      type(problem_info_t), intent(in) :: problemInfo
+      integer :: candidate_field, candidate_media, candidate_position(3)
+
+      edge_touches_another_medium = .false.
+      do candidate_field = IEX, IEZ
+         candidate_media = getMediaIndex(candidate_field, position(1), position(2), position(3), &
+                                         problemInfo%geometryToMaterialData)
+         if (candidate_media /= 1 .and. candidate_media /= media) then
+            edge_touches_another_medium = .true.
+            return
+         end if
+      end do
+      candidate_position = position
+      candidate_position(field) = candidate_position(field) + 1
+      do candidate_field = IEX, IEZ
+         candidate_media = getMediaIndex(candidate_field, candidate_position(1), candidate_position(2), &
+                                         candidate_position(3), problemInfo%geometryToMaterialData)
+         if (candidate_media /= 1 .and. candidate_media /= media) then
+            edge_touches_another_medium = .true.
+            return
+         end if
+      end do
+   end function edge_touches_another_medium
+
+   function get_field(field, i, j, k, fields_reference) result(res)
+      implicit none
+      real(kind=rkind) :: res
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(fields_reference_t), intent(in) :: fields_reference
+
+      ! Retrieves the field value based on the field index (1-3 for E, 4-6 for H)
+      select case (field)
+      case (IEX); res = fields_reference%e%x(i, j, k)
+      case (IEY); res = fields_reference%e%y(i, j, k)
+      case (IEZ); res = fields_reference%e%z(i, j, k)
+      case (IHX); res = fields_reference%h%x(i, j, k)
+      case (IHY); res = fields_reference%h%y(i, j, k)
+      case (IHZ); res = fields_reference%h%z(i, j, k)
+      end select
+   end function get_field
+
+   function get_delta(field, i, j, k, fields_reference) result(res)
+      implicit none
+      real(kind=rkind) :: res
+      integer(kind=4), intent(in) :: field, i, j, k
+      type(fields_reference_t), intent(in) :: fields_reference
+
+      ! Retrieves the spatial step size (delta) corresponding to the field direction
+      ! Note: i, j, k are used to select the correct array index if the grid is non-uniform.
+      select case (field)
+      case (IEX); res = fields_reference%e%deltax(i)
+      case (IEY); res = fields_reference%e%deltay(j)
+      case (IEZ); res = fields_reference%e%deltaz(k)
+      case (IHX); res = fields_reference%h%deltax(i)
+      case (IHY); res = fields_reference%h%deltay(j)
+      case (IHZ); res = fields_reference%h%deltaz(k)
+      end select
+   end function get_delta
+
+   subroutine create_data_file(filePathReference, probePathReference, domainTypeReference, fileExtension, header)
+      use directoryUtils_m
+      character(len=*), intent(out) :: filePathReference
+      character(len=*), intent(in) :: probePathReference
+      character(len=*), intent(in) :: domainTypeReference
+      character(len=*), intent(in) :: fileExtension
+      character(len=*), intent(in), optional :: header
+
+      character(len=1) :: sep = '_'
+      integer :: err, unit
+
+      filePathReference = trim(probePathReference)//sep//trim(domainTypeReference)//fileExtension
+      call create_file_with_path(filePathReference, err)
+      if (err /= 0 .or. .not. present(header)) return
+      open (newunit=unit, file=filePathReference, status='old', action='write', position='append', iostat=err)
+      if (err /= 0) return
+      write (unit, '(A)', iostat=err) trim(header)
+      close (unit)
+   end subroutine
+
+end module outputUtils_m
